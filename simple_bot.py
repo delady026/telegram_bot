@@ -4,11 +4,8 @@ import re
 import sqlite3
 from datetime import datetime
 
-import os
-
-TOKEN = os.getenv("8265851070:AAHB9CUdDF2pN7WjxXza1zhQSuh51C58hJs")
+TOKEN = "8265851070:AAHB9CUdDF2pN7WjxXza1zhQSuh51C58hJs"
 DB_PATH = "tracking.db"
-
 
 def get_conn():
     return sqlite3.connect(DB_PATH)
