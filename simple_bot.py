@@ -3,9 +3,12 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import re
 import sqlite3
 from datetime import datetime
+import os
 
-TOKEN = "8265851070:AAHB9CUdDF2pN7WjxXza1zhQSuh51C58hJs"
-DB_PATH = "tracking.db"
+# --- CONFIGURATION ---
+# Note: Keep your API token securely in your environment variables.
+TOKEN = os.getenv("8265851070:AAHB9CUdDF2pN7WjxXza1zhQSuh51C58hJs") 
+DB_PATH = "bot_database.db"  # Ensures the database path variable is globally accessible
 
 def get_conn():
     return sqlite3.connect(DB_PATH)
@@ -171,202 +174,91 @@ def extract_odds(text):
     return int(m.group(1)) / int(m.group(2))
 
 
-def split_input(text):
-    parts = [p.strip() for p in text.split(",") if p.strip()]
-    if len(parts) < 2:
-        return None, []
+import math
 
-    first = parts[0]
-    m = re.search(r'\d+\s*/\s*\d+', first)
-    if not m:
-        return None, []
+def poisson_probability(k, lam):
+    """Calculates Poisson probability for k goals given an average lambda."""
+    return (pow(lam, k) * math.exp(-lam)) / math.factorial(k)
 
-    before_odds = first[:m.start()].strip()
-    after_odds = first[m.start():].strip()
-
-    words = before_odds.split()
-    race = before_odds
-    first_runner = first
-
-    for i in range(len(words) - 1, 0, -1):
-        possible_race = " ".join(words[:i]).strip()
-        if re.search(r'\d{1,2}:\d{2}', possible_race):
-            race = possible_race
-            runner_name = " ".join(words[i:]).strip()
-            first_runner = f"{runner_name} {after_odds}"
-            break
-
-    return race, [first_runner] + parts[1:]
-
+def calculate_over_15_prob(home_attack, away_defense, away_attack, home_defense):
+    """
+    Calculates the true mathematical probability of Over 1.5 Goals
+    using Poisson Distribution based on historical team averages.
+    """
+    home_expected_goals = home_attack * home_defense
+    away_expected_goals = away_attack * away_defense
+    
+    p_home_0 = poisson_probability(0, home_expected_goals)
+    p_home_1 = poisson_probability(1, home_expected_goals)
+    p_away_0 = poisson_probability(0, away_expected_goals)
+    p_away_1 = poisson_probability(1, away_expected_goals)
+    
+    prob_0_0 = p_home_0 * p_away_0
+    prob_1_0 = p_home_1 * p_away_0
+    prob_0_1 = p_home_0 * p_away_1
+    
+    prob_under_15 = prob_0_0 + prob_1_0 + prob_0_1
+    return 1 - prob_under_15
 
 def score_runner(line):
+    """
+    Parses data-driven lines. Expected input format:
+    '18:00_Hammarby_v_Sirius Over_1.5_Goals 1/5 [HA:2.3, AD:1.9, AA:1.5, HD:1.2]'
+    """
     lower = line.lower()
-    fav = 0
-    danger = 0
-
+    
     odds = extract_odds(lower)
-
-    if odds is not None:
-        if odds <= 1.0:
-            fav += 5
-        elif odds <= 2.0:
-            fav += 3
-            danger += 2
-        elif odds <= 4.0:
-            fav += 1
-            danger += 2
-        elif odds >= 8:
-            danger -= 1
-
-    if "progressive" in lower:
-        fav += 2
-
-    if "solid form" in lower:
-        fav += 1
-
-    if "should win" in lower:
-        fav += 2
-
-    if "consistent" in lower:
-        fav += 1
-        danger += 2
-
-    if "won last" in lower or "recent win" in lower:
-        danger += 2
-
-    if "pulled up" in lower:
-        fav -= 2
-        danger += 1
-
-    if "placed" in lower or "frame" in lower:
-        danger += 0
-
+    if odds is None:
+        return {"name": "Unknown", "value_edge": -1, "prob": 0, "odds": 0}
+    
+    implied_prob = 1 / (1 + odds)
+    
+    ha = float(re.search(r'ha:(\d+\.\d+)', lower).group(1)) if re.search(r'ha:(\d+\.\d+)', lower) else 1.0
+    ad = float(re.search(r'ad:(\d+\.\d+)', lower).group(1)) if re.search(r'ad:(\d+\.\d+)', lower) else 1.0
+    aa = float(re.search(r'aa:(\d+\.\d+)', lower).group(1)) if re.search(r'aa:(\d+\.\d+)', lower) else 1.0
+    hd = float(re.search(r'hd:(\d+\.\d+)', lower).group(1)) if re.search(r'hd:(\d+\.\d+)', lower) else 1.0
+    
+    true_prob = calculate_over_15_prob(ha, ad, aa, hd)
+    value_edge = true_prob - implied_prob
+    
     m = re.search(r'\d+\s*/\s*\d+', line)
     name = line[:m.start()].strip() if m else line.strip()
-
-    return {"name": name, "fav": fav, "danger": danger}
-
+    
+    return {"name": name, "value_edge": value_edge, "prob": true_prob, "odds": odds}
 
 def analyse_race(text):
-    race, runner_lines = split_input(text)
-    if not race or len(runner_lines) < 2:
+    """Processes input text, checks for mathematical edge, and scales stake."""
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
         return None
-
-    runners = [score_runner(line) for line in runner_lines]
-    runners.sort(key=lambda x: x["fav"], reverse=True)
-
-    pick = runners[0]
-    dangers = sorted(runners[1:], key=lambda x: x["danger"], reverse=True)
-    main_danger = dangers[0] if dangers else {"name": "None", "danger": 0}
-
-    if pick["fav"] >= 4:
+        
+    first_part = parts[0]
+    m_odds = re.search(r'\d+\s*/\s*\d+', first_part)
+    if not m_odds:
+        return None
+    
+    fixture_name = first_part[:m_odds.start()].strip()
+    market_data = score_runner(first_part)
+    
+    edge = market_data["value_edge"]
+    true_percentage = market_data["prob"] * 100
+    
+    if edge >= 0.05:  
         decision = "BET"
-        reason = "Strong favourite"
-        stake = 2.0
-    elif pick["fav"] >= 2:
+        reason = f"Value Edge Detected: +{edge*100:.1f}%\nModel Probability: {true_percentage:.1f}%"
+        
+        b = market_data["odds"]
+        p = market_data["prob"]
+        q = 1 - p
+        kelly_stake = ((b * p) - q) / b
+        stake = round(max(0.5, min(5.0, kelly_stake * 10)), 1)
+    elif edge >= 0.0:
         decision = "WATCH"
-        reason = "Some confidence"
-        stake = 1.0
+        reason = f"Fairly Priced match (+{edge*100:.1f}% edge).\nNo substantial value."
+        stake = 0.0
     else:
         decision = "SKIP"
-        reason = "No edge"
+        reason = f"Negative Value: {edge*100:.1f}%\nBookie overpricing this line."
         stake = 0.0
-
-    return race, pick["name"], main_danger["name"], decision, reason, stake
-
-
-async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.replace("/analyse", "", 1).strip()
-    result = analyse_race(text)
-
-    if result is None:
-        await update.message.reply_text(
-            "Use:\n/analyse Race Name Horse A 2/1 comment, Horse B 5/1 comment"
-        )
-        return
-
-    race, pick, danger, decision, reason, stake = result
-    bet_id = save_bet(race, pick, danger, decision, reason, stake)
-    balance = get_bankroll()
-
-    await update.message.reply_text(
-f"""🏇 Smart Filter
-
-ID: {bet_id}
-Race: {race}
-
-Top Pick: {pick}
-Main Danger: {danger}
-
-Decision: {decision}
-Stake: {stake}u
-
-Reason:
-{reason}
-
-Bankroll: {balance}u
-"""
-    )
-
-
-async def result_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 2:
-        await update.message.reply_text("Use: /result <id> <win|lose|skip>")
-        return
-
-    try:
-        bet_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Bet ID must be a number.")
-        return
-
-    result = context.args[1].lower().strip()
-    if result not in {"win", "lose", "skip"}:
-        await update.message.reply_text("Result must be win, lose, or skip.")
-        return
-
-    status = settle_bet(bet_id, result)
-
-    if status == "missing":
-        await update.message.reply_text("No bet found with that ID.")
-        return
-    if status == "already_settled":
-        await update.message.reply_text("That bet is already settled.")
-        return
-
-    balance = get_bankroll()
-    await update.message.reply_text(f"Saved ✅\nNew bankroll: {balance}u")
-
-
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = get_stats()
-
-    await update.message.reply_text(
-f"""📊 Stats
-
-Total bets: {s['total_bets']}
-Settled: {s['settled_bets']}
-Wins: {s['wins']}
-Losses: {s['losses']}
-Skips: {s['skips']}
-
-Profit: {round(s['profit'], 2)}u
-Bankroll: {round(s['balance'], 2)}u
-ROI: {round(s['roi'], 1)}%
-"""
-    )
-
-
-def main():
-    init_db()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("analyse", analyse))
-    app.add_handler(CommandHandler("result", result_cmd))
-    app.add_handler(CommandHandler("stats", stats_cmd))
-
-    print("Running...")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+        
+    return fixture_name, market_data["name"], "Under_1.5_Goals Cover", decision, reason, stake
