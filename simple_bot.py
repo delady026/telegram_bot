@@ -7,7 +7,7 @@ import os
 import math
 
 # --- CONFIGURATION ---
-TOKEN = os.getenv("8265851070:AAHB9CUdDF2pN7WjxXza1zhQSuh51C58hJs") 
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") 
 DB_PATH = "bot_database.db"
 
 def get_conn():
